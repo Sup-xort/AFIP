@@ -10,25 +10,12 @@ from kivy.uix.anchorlayout import AnchorLayout
 from kivy.garden.graph import Graph, MeshLinePlot
 from kivy.graphics import Color, Rectangle
 import Sensor
-import MODEL
-import random
-
-# Fake BPM generator
-def get_fake_bpm():
-    return 72 + random.randint(-3, 3)
-
-# Placeholder for model decision
-def model_predict(bpm_data):
-    if len(bpm_data) == 0:
-        return 0
-    avg = sum(bpm_data) / len(bpm_data)
-    return 1 if avg > 80 else 0
+import model
 
 # Start Screen
 class StartScreen(Screen):
     def __init__(self, **kwargs):
         super().__init__(**kwargs)
-
         with self.canvas.before:
             Color(1, 1, 1, 1)
             self.bg = Rectangle(size=self.size, pos=self.pos)
@@ -61,7 +48,6 @@ class MainScreen(Screen):
         self.bpm_data = []
         self.sample_count = 0
         self.bpm_event = None
-        self.to_loading_event = None
 
         with self.canvas.before:
             Color(1, 1, 1, 1)
@@ -69,7 +55,6 @@ class MainScreen(Screen):
         self.bind(size=self._update_bg, pos=self._update_bg)
 
         self.layout = BoxLayout(orientation='vertical', padding=20, spacing=20)
-
         top_row = BoxLayout(orientation='horizontal', size_hint=(1, None), height=120, spacing=15)
         self.heart_image = Image(source='heart.png', size_hint=(None, None), size=(90, 90))
         self.bpm_label = Label(text='--', font_size='64sp', color=(0.5, 0.5, 0.5, 1), size_hint=(None, None), size=(120, 90))
@@ -107,31 +92,33 @@ class MainScreen(Screen):
     def start_measurement(self):
         self.bpm_data = []
         self.sample_count = 0
-        self.bpm_event = Clock.schedule_interval(self.update_bpm, 0.3)
-        self.to_loading_event = Clock.schedule_once(self.to_loading, 10)
+        self.bpm_event = Clock.schedule_interval(self.update_bpm, 0.1)
 
     def update_bpm(self, dt):
-        bpm = get_fake_bpm()
+        rri = Sensor.get_rri()
+        bpm = round(60000 / rri)
         self.bpm_label.text = str(bpm)
         self.bpm_data.append(bpm)
+
         if len(self.bpm_data) > 50:
             self.bpm_data.pop(0)
+
         self.sample_count += 1
         self.graph.xmin = self.sample_count - 50
         self.graph.xmax = self.sample_count
         self.plot.points = [(self.sample_count - len(self.bpm_data) + i, v)
                             for i, v in enumerate(self.bpm_data)]
 
-        if self.bpm_data:
-            center = self.bpm_data[0]
-            self.graph.ymin = center - 15
-            self.graph.ymax = center + 15
+        center = self.bpm_data[0]
+        self.graph.ymin = center - 15
+        self.graph.ymax = center + 15
 
-    def to_loading(self, dt):
+        if len(self.bpm_data) >= 20:
+            self.to_loading()
+
+    def to_loading(self):
         if self.bpm_event:
             self.bpm_event.cancel()
-        if self.to_loading_event:
-            self.to_loading_event.cancel()
         self.manager.get_screen('loading').receive_data(self.bpm_data)
         self.manager.current = 'loading'
 
@@ -139,7 +126,6 @@ class MainScreen(Screen):
 class LoadingScreen(Screen):
     def __init__(self, **kwargs):
         super().__init__(**kwargs)
-
         with self.canvas.before:
             Color(1, 1, 1, 1)
             self.bg = Rectangle(size=self.size, pos=self.pos)
@@ -158,7 +144,7 @@ class LoadingScreen(Screen):
         self.bg.pos = self.pos
 
     def receive_data(self, bpm_data):
-        self.result_code = model_predict(bpm_data)
+        self.result_code = MODEL.get_pred(bpm_data)
 
     def on_enter(self):
         self.event = Clock.schedule_interval(self.animate, 0.5)
@@ -180,7 +166,6 @@ class LoadingScreen(Screen):
 class ResultScreen(Screen):
     def __init__(self, **kwargs):
         super().__init__(**kwargs)
-
         with self.canvas.before:
             Color(1, 1, 1, 1)
             self.bg = Rectangle(size=self.size, pos=self.pos)
@@ -201,7 +186,7 @@ class ResultScreen(Screen):
         else:
             self.image_widget.source = 'danger.png'
 
-# App
+# App class
 class HeartApp(App):
     def build(self):
         sm = ScreenManager(transition=FadeTransition())
