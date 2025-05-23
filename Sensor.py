@@ -1,9 +1,8 @@
 import serial
 
-ser = serial.Serial("/dev/ttyAMA0", 115200)
-ser.reset_input_buffer()
-
 def get_rri():
+    ser = serial.Serial("/dev/ttyAMA0", 115200)
+    ser.reset_input_buffer()
     """
     유효한 RRI(200~2000ms)가 들어올 때까지 blocking 방식으로 기다림.
     """
