@@ -9,10 +9,20 @@ from kivy.uix.widget import Widget
 from kivy.uix.anchorlayout import AnchorLayout
 from kivy.garden.graph import Graph, MeshLinePlot
 from kivy.graphics import Color, Rectangle
+import threading
+import queue
 import Sensor
-import model
+import MODEL
 
-# Start Screen
+rri_queue = queue.Queue()
+
+def rri_reader():
+    while True:
+        rri = Sensor.get_rri()
+        rri_queue.put(rri)
+
+threading.Thread(target=rri_reader, daemon=True).start()
+
 class StartScreen(Screen):
     def __init__(self, **kwargs):
         super().__init__(**kwargs)
@@ -41,12 +51,12 @@ class StartScreen(Screen):
         self.manager.get_screen('main').start_measurement()
         self.manager.current = 'main'
 
-# Main BPM Graph Screen
 class MainScreen(Screen):
     def __init__(self, **kwargs):
         super().__init__(**kwargs)
         self.bpm_data = []
         self.sample_count = 0
+        self.valid_seq_count = 0
         self.bpm_event = None
 
         with self.canvas.before:
@@ -92,13 +102,24 @@ class MainScreen(Screen):
     def start_measurement(self):
         self.bpm_data = []
         self.sample_count = 0
+        self.valid_seq_count = 0
         self.bpm_event = Clock.schedule_interval(self.update_bpm, 0.1)
 
     def update_bpm(self, dt):
-        rri = Sensor.get_rri()
+        try:
+            rri = rri_queue.get_nowait()
+        except queue.Empty:
+            return
+
+        if not (200 < rri < 2100):
+            self.valid_seq_count = 0
+            return
+
+        self.valid_seq_count += 1
+        self.bpm_data.append(rri)
+
         bpm = round(60000 / rri)
         self.bpm_label.text = str(bpm)
-        self.bpm_data.append(bpm)
 
         if len(self.bpm_data) > 50:
             self.bpm_data.pop(0)
@@ -106,23 +127,22 @@ class MainScreen(Screen):
         self.sample_count += 1
         self.graph.xmin = self.sample_count - 50
         self.graph.xmax = self.sample_count
-        self.plot.points = [(self.sample_count - len(self.bpm_data) + i, v)
+        self.plot.points = [(self.sample_count - len(self.bpm_data) + i, 60000 / v)
                             for i, v in enumerate(self.bpm_data)]
 
-        center = self.bpm_data[0]
+        center = 60000 / self.bpm_data[0]
         self.graph.ymin = center - 15
         self.graph.ymax = center + 15
 
-        if len(self.bpm_data) >= 20:
+        if self.valid_seq_count >= 20:
             self.to_loading()
 
     def to_loading(self):
         if self.bpm_event:
             self.bpm_event.cancel()
-        self.manager.get_screen('loading').receive_data(self.bpm_data)
+        self.manager.get_screen('loading').receive_data(self.bpm_data[-20:])
         self.manager.current = 'loading'
 
-# Loading screen
 class LoadingScreen(Screen):
     def __init__(self, **kwargs):
         super().__init__(**kwargs)
@@ -138,17 +158,19 @@ class LoadingScreen(Screen):
         self.dot_index = 0
         self.dots = ['Loading.', 'Loading..', 'Loading...']
         self.event = None
+        self.bpm_data = []
 
     def _update_bg(self, *args):
         self.bg.size = self.size
         self.bg.pos = self.pos
 
     def receive_data(self, bpm_data):
-        self.result_code = MODEL.get_pred(bpm_data)
+        self.bpm_data = bpm_data
 
     def on_enter(self):
+        self.dot_index = 0
         self.event = Clock.schedule_interval(self.animate, 0.5)
-        Clock.schedule_once(self.pass_result, 2.0)
+        threading.Thread(target=self.run_prediction, daemon=True).start()
 
     def on_leave(self):
         if self.event:
@@ -158,11 +180,15 @@ class LoadingScreen(Screen):
         self.label.text = self.dots[self.dot_index]
         self.dot_index = (self.dot_index + 1) % len(self.dots)
 
-    def pass_result(self, dt):
-        self.manager.get_screen('result').set_result(self.result_code)
+    def run_prediction(self):
+        result, prob = MODEL.get_pred(self.bpm_data)
+        Clock.schedule_once(lambda dt: self.pass_result(result, prob), 0)
+
+    def pass_result(self, result, prob):
+        result_screen = self.manager.get_screen('result')
+        result_screen.set_result(result, prob)
         self.manager.current = 'result'
 
-# Result screen
 class ResultScreen(Screen):
     def __init__(self, **kwargs):
         super().__init__(**kwargs)
@@ -171,22 +197,30 @@ class ResultScreen(Screen):
             self.bg = Rectangle(size=self.size, pos=self.pos)
         self.bind(size=self._update_bg, pos=self._update_bg)
 
-        self.layout = AnchorLayout()
+        self.layout = BoxLayout(orientation='vertical', padding=20)
         self.image_widget = Image(size_hint=(None, None), size=(150, 150))
+        self.label = Label(text='', font_size='20sp', color=(0, 0, 0, 1))
         self.layout.add_widget(self.image_widget)
+        self.layout.add_widget(self.label)
         self.add_widget(self.layout)
 
     def _update_bg(self, *args):
         self.bg.size = self.size
         self.bg.pos = self.pos
 
-    def set_result(self, result):
+    def set_result(self, result, prob):
         if result == 0:
             self.image_widget.source = 'check.png'
+            self.label.text = f"Normal rhythm\nConfidence: {prob*100:.1f}%"
         else:
-            self.image_widget.source = 'danger.png'
+            self.image_widget.source = 'warning.png'
+            self.label.text = f"Irregular heartbeat\nConfidence: {prob*100:.1f}%"
 
-# App class
+        Clock.schedule_once(lambda dt: self.go_back_to_start(), 5.0)
+
+    def go_back_to_start(self):
+        self.manager.current = 'start'
+
 class HeartApp(App):
     def build(self):
         sm = ScreenManager(transition=FadeTransition())
